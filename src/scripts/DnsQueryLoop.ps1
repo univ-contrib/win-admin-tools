@@ -28,12 +28,10 @@
     Requires PowerShell 5+. The script uses the external 'dig' utility.
 
 .VERSION
-    1.6 - Added positional parameters support
+    1.7 - Fixed DNS timeout detection to correctly trigger backup DNS
 #>
 
-# -------------------------
-# Parameters with positional support
-# -------------------------
+# ** Parameters with positional support
 param(
     [Parameter(Mandatory=$true, Position=0)][ValidateNotNullOrEmpty()][string]$Hostname,
     [Parameter(Mandatory=$true, Position=1)][ValidateNotNullOrEmpty()][string]$PrimaryDnsServer,
@@ -42,9 +40,7 @@ param(
     [Parameter(Mandatory=$false, Position=4)][ValidateNotNullOrEmpty()][string]$LogFile = "$PSScriptRoot\DnsQueryLoop.log"
 )
 
-# -------------------------
-# Script version info
-# -------------------------
+# ** Script version info
 $ScriptVersion = "1.6"  # Current version
 $ScriptRevisionHistory = @(
     "1.1 - Initial version with primary/backup DNS fallback, timestamped logging",
@@ -53,56 +49,35 @@ $ScriptRevisionHistory = @(
     "1.4 - Added log file creation with header (optional)",
     "1.5 - Parameter validation and default values cleaned up",
     "1.6 - Added positional parameters support"
+    "1.7 - Fixed DNS timeout detection to correctly trigger backup DNS"
 )
 
-# -------------------------
-# Print input parameters and version
-# -------------------------
-Write-Host "DNS Query Loop - Script Version: $ScriptVersion"
-Write-Host "Starting DNS query loop with parameters:"
-Write-Host "  Script Version    : $ScriptVersion"
+# ** Print input parameters and version
+Write-Host "DNS Query Loop - Script Version: $ScriptVersion using params"
 Write-Host "  Hostname          : $Hostname"
 Write-Host "  Primary DNS       : $PrimaryDnsServer"
 Write-Host "  Backup DNS        : $BackupDnsServer"
 Write-Host "  Query Interval(s) : $IntervalSeconds"
 Write-Host "  Log File          : $LogFile"
-Write-Host "---------------------------------------------"
-Write-Host "Timestamp`tDNS Server`tResult"
-Write-Host "---------------------------------------------"
+Write-Host ("{0,-23} {1,-15} {2,-20} {3}" -f "Timestamp", "DNS", "Hostname", "Result")
+Write-Host ("{0,-23} {1,-15} {2,-20} {3}" -f "---------", "---", "--------", "------")
 
-# -------------------------
-# Print input parameters and version
-# -------------------------
-#Write-Host "DNS Query Loop - Script Version: $ScriptVersion"
-Write-Host "Starting DNS query loop with parameters:"
-Write-Host "  Script Version    : $ScriptVersion"
-Write-Host "  Hostname          : $Hostname"
-Write-Host "  Primary DNS       : $PrimaryDnsServer"
-Write-Host "  Backup DNS        : $BackupDnsServer"
-Write-Host "  Query Interval(s) : $IntervalSeconds"
-Write-Host "  Log File          : $LogFile"
-Write-Host "---------------------------------------------"
-Write-Host "Timestamp`tDNS Server`tResult"
-Write-Host "---------------------------------------------"
-
-# -------------------------
-# Main loop
-# -------------------------
+# ** Main loop
 while ($true) {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
 
     # Query primary DNS
-    $dnsResult = dig "@$PrimaryDnsServer" +short $Hostname 2>$null
-    if (-not $dnsResult) {
-        # Fallback to backup DNS
-        $dnsResult = dig "@$BackupDnsServer" +short $Hostname 2>$null
+    $dnsResult = dig "@$PrimaryDnsServer" +short $Hostname 2>&1
+
+    if (-not $dnsResult -or $dnsResult -match "timed out|no servers could be reached") {
+        $dnsResult = dig "@$BackupDnsServer" +short $Hostname 2>&1
         $dnsUsed = $BackupDnsServer
     } else {
         $dnsUsed = $PrimaryDnsServer
     }
 
     # Prepare output line
-    $outputLine = "$timestamp`t$dnsUsed`t$dnsResult"
+    $outputLine = ("{0,-23} {1,-15} {2,-20} {3}" -f $timestamp, $dnsUsed, $Hostname, $dnsResult)
 
     # Write to console and log file
     Write-Output $outputLine
