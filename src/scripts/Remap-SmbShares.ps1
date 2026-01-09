@@ -1,11 +1,10 @@
 <#
+
 .SYNOPSIS
-    Remaps all SMB shares from an old hostname to a new hostname for the current user, with logging and prechecks.
+    Remaps all SMB shares from an old hostname to a new hostname with logging for the current user.
 
 .DESCRIPTION
-    This script scans all current SMB client mappings (both drive-letter and UNC-only) 
-    that reference the old hostname, removes them, and recreates them using the new hostname. 
-    It preserves persistence and existing drive letters. All actions are logged.
+    Scans all current SMB mappings referencing the old hostname, removes them, and recreates them using the new hostname. Preserves persistence and drive letters.
 
 .PARAMETER OldName
     The current/old hostname of the SMB server. Example: OLDNAME
@@ -23,29 +22,29 @@
     - If credentials are cached for OLDNAME, remove them with:
         cmdkey /delete:OLDNAME
     - Logs are written to the current directory: Remap-SmbShares.log
+
+.VERSION
+    1.1 - Initial version to remap drives with different DNS root hostname
 #>
 
-param (
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$OldName,
-
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$NewName
+# ** Script version info
+$ScriptVersion = "1.1"  # Current version
+$ScriptRevisionHistory = @(
+    "1.1 - Initial version to remap drives with different DNS root hostname",
 )
 
-# -----------------------------
-# Execution Precheck: PowerShell 5+
-# -----------------------------
+param(
+    [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$OldName,
+    [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$NewName
+)
+
+# ** Precheck: PowerShell 5+
 if ($PSVersionTable.PSVersion.Major -lt 5) {
-    Write-Host "ERROR: This script requires PowerShell 5.0 or higher. Detected version: $($PSVersionTable.PSVersion)"
+    Write-Host "ERROR: Requires PowerShell 5+. Detected $($PSVersionTable.PSVersion)"
     exit 1
 }
 
-# -----------------------------
-# Logging Setup
-# -----------------------------
+# ** Logging Setup
 $LogFile = Join-Path -Path $PSScriptRoot -ChildPath "Remap-SmbShares.log"
 
 function Write-Log {
@@ -63,9 +62,7 @@ function Write-Log {
 
 Write-Log "Starting remap from '$OldName' to '$NewName'"
 
-# -----------------------------
-# Enumerate existing SMB mappings
-# -----------------------------
+# ** Enumerate existing SMB mappings
 try {
     $mappings = Get-SmbMapping | Where-Object {
         $_.RemotePath -match "(?i)\\\\$OldName\\"
@@ -80,16 +77,11 @@ if (-not $mappings) {
     exit 0
 }
 
-# -----------------------------
-# Remap each mapping
-# -----------------------------
+# ** Remap each mapping
 foreach ($map in $mappings) {
-
     $oldPath = $map.RemotePath
     $newPath = $oldPath -replace "(?i)\\\\$OldName\\", "\\$NewName\"
-
     Write-Log "Remapping: $oldPath -> $newPath"
-
     try {
         # Remove existing mapping
         if ($map.LocalPath) {
