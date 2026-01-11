@@ -8,34 +8,43 @@
     that are not in the desired state are presented to the user for confirmation before applying changes.
     Logging is performed for all actions, including before/after states and items already correct.
 
-.PARAMETER None
-    All actions are defined inside the script. The user will be prompted only for items that require updates.
+.PARAMETER Force
+    Automatically approve all changes without prompting.
+
+.PARAMETER Preview
+    Inspects and logs all items, but does not apply any changes. Uses a separate preview log.
 
 .EXAMPLE
-    .\Win-Telemetry-Hardening.ps1
+    .\Win-Telemetry-Hardening.ps1 -Force
+    Applies all changes automatically without user prompts.
+
+.EXAMPLE
+    .\Win-Telemetry-Hardening.ps1 -Preview
+    Performs inspection only; logs results in a separate preview log file.
 
 .NOTES
     - Must be run as Administrator.
-    - Logs all transactions in C:\Windows\TelemetryTransaction.log
+    - Logs all transactions in C:\Windows\TelemetryTransaction.log (or Preview log)
     - Works on Windows 10 Pro/Enterprise/LTSC (Home not fully supported)
     - PowerShell 5+ recommended.
 
 .VERSION
-    1.2 - Parameter validation and pre-flight checks
+    1.3 - Added -Force and -Preview parameters with separate log for preview
 #>
 
-
-
+[CmdletBinding()]
+param(
+    [switch]$Force,
+    [switch]$Preview
+)
 
 # ** Script version info
-$ScriptVersion = "1.2"
+$ScriptVersion = "1.3"
 $ScriptRevisionHistory = @(
+    "1.3 - Added -Force and -Preview parameters with separate log",
     "1.2 - Parameter validation and pre-flight checks",
     "1.1 - Initial version with user validation and changes"
 )
-
-$LogFile = "C:\Windows\TelemetryTransaction.log"
-
 
 # ** Pre-flight checks
 
@@ -53,6 +62,13 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     exit
 }
 
+# ** Set log file
+$TransactionLogFile = "C:\Windows\TelemetryTransaction.log"
+$PreviewLogFile = "C:\Windows\TelemetryTransaction_Preview.log"
+$LogFile = if ($Preview) { $PreviewLogFile } else { $TransactionLogFile }
+
+$modeText = if ($Preview) { "PREVIEW MODE (no changes will be applied)" } else { "EXECUTION MODE" }
+
 # ** Logging function
 Function Write-Log {
     param(
@@ -64,7 +80,7 @@ Function Write-Log {
     Add-Content -Path $LogFile -Value $Entry
 }
 
-Write-Log "=== Win-Telemetry-Hardening Script Version $ScriptVersion Started ===" -State "Audit"
+Write-Log "=== Win-Telemetry-Hardening Script Version $ScriptVersion Started - $modeText ===" -State "Audit"
 
 # ** Helper Functions
 Function Get-RegistryValue { 
@@ -79,7 +95,7 @@ Function Get-RegistryValue {
 # ** Define all items to inspect
 $AllChanges = @()
 
-# Registry keys to update
+# ** Registry keys to update
 $registryChanges = @(
     @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"; Name="AllowTelemetry"; Value=0; Desc="Telemetry Level"},
     @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Name="AllowCortana"; Value=0; Desc="Cortana Disable"},
@@ -99,7 +115,7 @@ foreach ($reg in $registryChanges) {
     }
 }
 
-# Services to update
+# ** Services to update
 $serviceChanges = @(
     @{Name="DiagTrack"; Status="Stopped"; StartType="Disabled"; Desc="Telemetry Service"},
     @{Name="dmwappushservice"; Status="Stopped"; StartType="Disabled"; Desc="WAP Push Service"},
@@ -118,7 +134,7 @@ foreach ($s in $serviceChanges) {
     }
 }
 
-# Tasks to disable
+# ** Tasks to disable
 $taskChanges = @(
     "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
     "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
@@ -135,9 +151,14 @@ foreach ($t in $taskChanges) {
     }
 }
 
-# ** Prompt user only for items that need change
+# ** Prompt user only for items that need change (Force skips prompts)
 $ApprovedChanges = @()
 foreach ($item in $AllChanges | Where-Object { $_.NeedsChange }) {
+    if ($Force) {
+        $ApprovedChanges += $item
+        continue
+    }
+
     switch ($item.Type) {
         "Registry" {
             $current = if ($null -ne $item.CurrentValue) { $item.CurrentValue } else { "Not set" }
@@ -150,28 +171,46 @@ foreach ($item in $AllChanges | Where-Object { $_.NeedsChange }) {
             $prompt = "Task '$($item.TaskName)': Current=$($item.CurrentState), Desired=Disabled. Apply change? (Y/N)"
         }
     }
+
     $resp = Read-Host $prompt
     if ($resp -match "^[Yy]$") { $ApprovedChanges += $item }
 }
 
-# ** Show summary and final confirmation
-if ($ApprovedChanges.Count -eq 0) {
-    Write-Host "No changes selected. Exiting."
-    Write-Log "No changes selected by user" -State "Already"
+# ** Preview mode: show summary and exit
+if ($Preview) {
+    Write-Host "`nPreview mode active. No changes will be applied."
+    Write-Host "The following changes would have been applied:"
+    foreach ($c in $ApprovedChanges) {
+        switch ($c.Type) {
+            "Registry" { Write-Host "Registry: $($c.Desc) -> $($c.DesiredValue)" }
+            "Service" { Write-Host "Service: $($c.Desc) -> Status=$($c.DesiredStatus), StartType=$($c.DesiredStartType)" }
+            "Task" { Write-Host "Task: $($c.TaskName) -> Disabled" }
+        }
+    }
+    Write-Log "Preview mode: no changes applied. Items inspected: $($ApprovedChanges.Count)" -State "Audit"
     exit
 }
 
-Write-Host "`nYou have approved the following changes:"
-foreach ($c in $ApprovedChanges) {
-    switch ($c.Type) {
-        "Registry" { Write-Host "Registry: $($c.Desc) -> $($c.DesiredValue)" }
-        "Service" { Write-Host "Service: $($c.Desc) -> Status=$($c.DesiredStatus), StartType=$($c.DesiredStartType)" }
-        "Task" { Write-Host "Task: $($c.TaskName) -> Disabled" }
+# ** Show summary and final confirmation (if not Force)
+if (-not $Force) {
+    if ($ApprovedChanges.Count -eq 0) {
+        Write-Host "No changes selected. Exiting."
+        Write-Log "No changes selected by user" -State "Already"
+        exit
     }
-}
 
-$final = Read-Host "Apply all approved changes? (Y/N)"
-if ($final -notmatch "^[Yy]$") { Write-Host "Changes cancelled by user."; exit }
+    Write-Host "`nYou have approved the following changes:"
+    foreach ($c in $ApprovedChanges) {
+        switch ($c.Type) {
+            "Registry" { Write-Host "Registry: $($c.Desc) -> $($c.DesiredValue)" }
+            "Service" { Write-Host "Service: $($c.Desc) -> Status=$($c.DesiredStatus), StartType=$($c.DesiredStartType)" }
+            "Task" { Write-Host "Task: $($c.TaskName) -> Disabled" }
+        }
+    }
+
+    $final = Read-Host "Apply all approved changes? (Y/N)"
+    if ($final -notmatch "^[Yy]$") { Write-Host "Changes cancelled by user."; exit }
+}
 
 # ** Execute approved changes
 foreach ($change in $ApprovedChanges) {
