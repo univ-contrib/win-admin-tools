@@ -14,6 +14,9 @@
 .PARAMETER Preview
     Inspects and logs all items, but does not apply any changes. Uses a separate preview log.
 
+.PARAMETER Help
+    Displays this help message and exits.
+
 .EXAMPLE
     .\Win-Telemetry-Hardening.ps1 -Force
     Applies all changes automatically without user prompts.
@@ -29,19 +32,43 @@
     - PowerShell 5+ recommended.
 
 .VERSION
-    1.3 - Added -Force and -Preview parameters with separate log for preview
+    1.6 - Added final summary table of all changes applied, colored output, and preview log support
 #>
 
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [switch]$Preview
+    [switch]$Preview,
+    [switch]$Help
 )
 
+# ** Parameter validation and help
+if ($Help) {
+    Write-Host "Win-Telemetry-Hardening.ps1 - Hardens Windows 10 telemetry, Cortana, Copilot, and update behaviors." -ForegroundColor Cyan
+    Write-Host "`nUsage:"
+    Write-Host "    .\Win-Telemetry-Hardening.ps1 [-Force] [-Preview] [-Help]" -ForegroundColor Cyan
+    Write-Host "`nParameters:"
+    Write-Host "    -Force     Automatically approve all changes without prompting." -ForegroundColor Cyan
+    Write-Host "    -Preview   Inspect and log all changes only, no modifications applied." -ForegroundColor Cyan
+    Write-Host "    -Help      Show this help message." -ForegroundColor Cyan
+    exit
+}
+
+$AllowedParams = @("Force","Preview","Help")
+$UnknownParams = $PSBoundParameters.Keys | Where-Object { $_ -notin $AllowedParams }
+if ($UnknownParams.Count -gt 0) {
+    Write-Host "ERROR: Unknown parameter(s): $($UnknownParams -join ', ')" -ForegroundColor Red
+    Write-Host "Usage: .\Win-Telemetry-Hardening.ps1 [-Force] [-Preview] [-Help]" -ForegroundColor Cyan
+    exit
+}
+
 # ** Script version info
-$ScriptVersion = "1.3"
+$ScriptVersion = "1.6"
 $ScriptRevisionHistory = @(
-    "1.3 - Added -Force and -Preview parameters with separate log",
+    "1.6 - Added final summary table, colored output, and preview log",
+    "1.5 - Added colored console output",
+    "1.4 - Added parameter validation and -Help support",
+    "1.3 - Added -Force and -Preview parameters",
     "1.2 - Parameter validation and pre-flight checks",
     "1.1 - Initial version with user validation and changes"
 )
@@ -50,24 +77,24 @@ $ScriptRevisionHistory = @(
 
 # PowerShell version check (require 5.1+)
 if ($PSVersionTable.PSVersion.Major -lt 5 -or ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
-    Write-Host "ERROR: This script requires PowerShell 5.1 or higher. Current version: $($PSVersionTable.PSVersion)"
-    exit
+    Write-Host "ERROR: PowerShell 5.1+ required. Current: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    exit 1
 }
 
 # Administrator check
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-    Write-Host "ERROR: This script must be run as Administrator."
-    exit
+    Write-Host "ERROR: Must run as Administrator." -ForegroundColor Red
+    exit 1
 }
 
 # ** Set log file
 $TransactionLogFile = "C:\Windows\TelemetryTransaction.log"
 $PreviewLogFile = "C:\Windows\TelemetryTransaction_Preview.log"
-$LogFile = if ($Preview) { $PreviewLogFile } else { $TransactionLogFile }
+if ($Preview) { $LogFile = $PreviewLogFile } else { $LogFile = $TransactionLogFile }
 
-$modeText = if ($Preview) { "PREVIEW MODE (no changes will be applied)" } else { "EXECUTION MODE" }
+$modeText = if ($Preview) { "PREVIEW MODE (no changes applied)" } else { "EXECUTION MODE" }
 
 # ** Logging function
 Function Write-Log {
@@ -78,20 +105,29 @@ Function Write-Log {
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $Entry = "$Timestamp - [$State] $Message"
     Add-Content -Path $LogFile -Value $Entry
+
+    switch ($State) {
+        "Before" { Write-Host "[Before] $Message" -ForegroundColor Yellow }
+        "After" { Write-Host "[After] $Message" -ForegroundColor Green }
+        "Already" { Write-Host "[Already] $Message" -ForegroundColor DarkYellow }
+        "Audit" { Write-Host "[Audit] $Message" -ForegroundColor Cyan }
+    }
 }
 
 Write-Log "=== Win-Telemetry-Hardening Script Version $ScriptVersion Started - $modeText ===" -State "Audit"
 
 # ** Helper Functions
-Function Get-RegistryValue { 
+Function Get-RegistryValue {
     param([string]$Path,[string]$Name)
-    if (Test-Path $Path) { 
+    if (Test-Path $Path) {
         return (Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue | Select-Object -ExpandProperty $Name -ErrorAction SilentlyContinue) 
     } else { 
         return $null 
     }
 }
 
+# ** Track executed changes
+$ExecutedChanges = @()
 # ** Define all items to inspect
 $AllChanges = @()
 
@@ -156,19 +192,18 @@ $ApprovedChanges = @()
 foreach ($item in $AllChanges | Where-Object { $_.NeedsChange }) {
     if ($Force) {
         $ApprovedChanges += $item
-        continue
+        continue 
     }
 
     switch ($item.Type) {
         "Registry" {
-            $current = if ($null -ne $item.CurrentValue) { $item.CurrentValue } else { "Not set" }
-            $prompt = "Registry '$($item.Desc)': Current='$current', Desired='$($item.DesiredValue)'. Apply change? (Y/N)"
+            $prompt = "Registry '$($item.Desc)': Current='$($item.CurrentValue)', Desired='$($item.DesiredValue)'. Apply change? (Y/N)" 
         }
-        "Service" {
-            $prompt = "Service '$($item.Desc)': Current Status=$($item.CurrentStatus), StartType=$($item.CurrentStartType), Desired Status=$($item.DesiredStatus), StartType=$($item.DesiredStartType). Apply change? (Y/N)"
+        "Service" { 
+            $prompt = "Service '$($item.Desc)': Current Status=$($item.CurrentStatus), StartType=$($item.CurrentStartType), Desired Status=$($item.DesiredStatus), StartType=$($item.DesiredStartType). Apply change? (Y/N)" 
         }
-        "Task" {
-            $prompt = "Task '$($item.TaskName)': Current=$($item.CurrentState), Desired=Disabled. Apply change? (Y/N)"
+        "Task" { 
+            $prompt = "Task '$($item.TaskName)': Current=$($item.CurrentState), Desired=Disabled. Apply change? (Y/N)" 
         }
     }
 
@@ -178,13 +213,13 @@ foreach ($item in $AllChanges | Where-Object { $_.NeedsChange }) {
 
 # ** Preview mode: show summary and exit
 if ($Preview) {
-    Write-Host "`nPreview mode active. No changes will be applied."
-    Write-Host "The following changes would have been applied:"
+    Write-Host "`nPreview mode active. No changes will be applied." -ForegroundColor Cyan
+    Write-Host "The following changes would have been applied:" -ForegroundColor Cyan
     foreach ($c in $ApprovedChanges) {
         switch ($c.Type) {
-            "Registry" { Write-Host "Registry: $($c.Desc) -> $($c.DesiredValue)" }
-            "Service" { Write-Host "Service: $($c.Desc) -> Status=$($c.DesiredStatus), StartType=$($c.DesiredStartType)" }
-            "Task" { Write-Host "Task: $($c.TaskName) -> Disabled" }
+            "Registry" { Write-Host "Registry: $($c.Desc) -> $($c.DesiredValue)" -ForegroundColor Yellow }
+            "Service" { Write-Host "Service: $($c.Desc) -> Status=$($c.DesiredStatus), StartType=$($c.DesiredStartType)" -ForegroundColor Yellow }
+            "Task" { Write-Host "Task: $($c.TaskName) -> Disabled" -ForegroundColor Yellow }
         }
     }
     Write-Log "Preview mode: no changes applied. Items inspected: $($ApprovedChanges.Count)" -State "Audit"
@@ -193,9 +228,9 @@ if ($Preview) {
 
 # ** Show summary and final confirmation (if not Force)
 if (-not $Force) {
-    if ($ApprovedChanges.Count -eq 0) {
-        Write-Host "No changes selected. Exiting."
-        Write-Log "No changes selected by user" -State "Already"
+    if ($ApprovedChanges.Count -eq 0) { 
+        Write-Host "No changes selected. Exiting." -ForegroundColor Cyan; 
+        Write-Log "No changes selected by user" -State "Already" 
         exit
     }
 
@@ -209,34 +244,50 @@ if (-not $Force) {
     }
 
     $final = Read-Host "Apply all approved changes? (Y/N)"
-    if ($final -notmatch "^[Yy]$") { Write-Host "Changes cancelled by user."; exit }
+    if ($final -notmatch "^[Yy]$") { Write-Host "Changes cancelled by user." -ForegroundColor Red; exit }
 }
 
 # ** Execute approved changes
 foreach ($change in $ApprovedChanges) {
     switch ($change.Type) {
         "Registry" {
-            Write-Log "$($change.Desc): Current=$($change.CurrentValue), Desired=$($change.DesiredValue)" -State "Before"
+            $before = $change.CurrentValue; $after = $change.DesiredValue
+            Write-Log "$($change.Desc): Current=$before, Desired=$after" -State "Before"
             if (!(Test-Path $change.Path)) { New-Item -Path $change.Path -Force | Out-Null }
-            Set-ItemProperty -Path $change.Path -Name $change.Name -Value $change.DesiredValue
-            Write-Log "$($change.Desc): Changed to $($change.DesiredValue)" -State "After"
+            Set-ItemProperty -Path $change.Path -Name $change.Name -Value $after
+            Write-Log "$($change.Desc): Changed to $after" -State "After"
+            $ExecutedChanges += [PSCustomObject]@{Type="Registry"; Desc=$change.Desc; Before=$before; After=$after}
         }
         "Service" {
-            Write-Log "$($change.Desc): Status=$($change.CurrentStatus), StartType=$($change.CurrentStartType)" -State "Before"
+            $beforeStatus = $change.CurrentStatus; $beforeStart = $change.CurrentStartType
             if ($change.DesiredStatus -eq "Stopped") { Stop-Service -Name $change.Name -Force -ErrorAction SilentlyContinue }
             Set-Service -Name $change.Name -StartupType $change.DesiredStartType -ErrorAction SilentlyContinue
             $svcUpdated = Get-Service -Name $change.Name -ErrorAction SilentlyContinue
             $statusUpdated = if ($svcUpdated) { $svcUpdated.Status } else { "Not found" }
             $startUpdated = if ($svcUpdated) { $svcUpdated.StartType } else { "N/A" }
             Write-Log "$($change.Desc): Status=$statusUpdated, StartType=$startUpdated" -State "After"
+            $ExecutedChanges += [PSCustomObject]@{Type="Service"; Desc=$change.Desc; Before="Status=$beforeStatus, StartType=$beforeStart"; After="Status=$statusUpdated, StartType=$startUpdated"}
         }
         "Task" {
-            Write-Log "Task ${($change.TaskName)}: Current=$($change.CurrentState)" -State "Before"
+            $before = $change.CurrentState
             schtasks /Change /TN $change.TaskName /Disable 2>$null
+            $after = "Disabled"
             Write-Log "Task ${($change.TaskName)} disabled" -State "After"
+            $ExecutedChanges += [PSCustomObject]@{Type="Task"; Desc=$change.TaskName; Before=$before; After=$after}
         }
     }
 }
 
+# ** Final summary table
+Write-Host "`n=== Changes Summary ===" -ForegroundColor Cyan
+$ExecutedChanges | Format-Table @{Label="Type";Expression={$_.Type};Width=10},
+                                @{Label="Description";Expression={$_.Desc};Width=50},
+                                @{Label="Before";Expression={$_.Before};Width=30},
+                                @{Label="After";Expression={$_.After};Width=30} -AutoSize
+
+foreach ($c in $ExecutedChanges) {
+    Write-Log "$($c.Type) | $($c.Desc) | Before: $($c.Before) | After: $($c.After)" -State "Audit"
+}
+
 Write-Log "=== Win-Telemetry-Hardening Script Version $ScriptVersion Completed ===" -State "After"
-Write-Host "All approved changes executed. Transaction log at $LogFile"
+Write-Host "All approved changes executed. Transaction log at $LogFile" -ForegroundColor Green
